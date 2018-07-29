@@ -30,12 +30,12 @@ fun main(args: Array<String>) {
             val cost = input.nextInt()
             val attack = input.nextInt()
             val defense = input.nextInt()
-            val abilities = input.next()
+            val abilitiesStr = input.next()
             val myHealthChange = input.nextInt()
             val opponentHealthChange = input.nextInt()
             val cardDraw = input.nextInt()
 
-            val card = Card(cardNumber, instanceId, location, cardType, cost, attack, defense, abilities,
+            val card = Card(cardNumber, instanceId, location, CardType(cardType), cost, attack, defense, Abilities(abilitiesStr),
                     myHealthChange, opponentHealthChange, cardDraw)
 
             cards += card
@@ -62,26 +62,30 @@ fun main(args: Array<String>) {
         while (summonableCards.isNotEmpty()) {
 
             val cardToSummon = cardToSummon(cards, summonableCards)
+
+            cardToSummon.location = Location.UNUSABLE
             player.remainingMana -= cardToSummon.cost
-            summonedCards++
+
+            if (cardToSummon.isCreature())
+                summonedCards++
 
             when {
-                cardToSummon.type == CardType.CREATURE -> summonString += "SUMMON ${cardToSummon.id}; "
-                cardToSummon.type == CardType.GREEN_ITEM -> {
-                    summonString += "USE ${cardToSummon.id} ${targetForGreenItem(cards).id};"
+                cardToSummon.isCreature() -> summonString += SummonAction(cardToSummon)
+                cardToSummon.isGreenItem() -> {
+                    summonString += UseAction(cardToSummon, targetForGreenItem(cards))
                 }
-                cardToSummon.type == CardType.RED_ITEM -> {
-                    summonString += "USE ${cardToSummon.id} ${targetForRedItem(cards).id};"
+                cardToSummon.isRedItem() -> {
+                    summonString += UseAction(cardToSummon, targetForRedItem(cards))
                 }
-                cardToSummon.type == CardType.BLUE_ITEM -> {
-                    summonString += "USE ${cardToSummon.id} -1;"
+                cardToSummon.isBlueItem() -> {
+                    summonString += UseAction(cardToSummon.id, -1)
                 }
             }
 
             summonableCards = cards.summonable(player.remainingMana, summonedCards)
         }
 
-        println(summonString + attackString(cards))
+        println(summonString + attackAction(cards, opponent))
     }
 }
 
@@ -90,10 +94,18 @@ class Location {
         const val HANDS = 0
         const val PLAYER = 1
         const val OPPONENT = -1
+        // makes sure the card isn't played, but isn't picked to be summoned again either
+        // if:
+        // - a creature just got summoned
+        // - an item just got used
+        // - a creature just attacked
+        const val UNUSABLE = 2
     }
 }
 
-class Ability {
+
+class Abilities(var abilities: String) {
+
     companion object {
         const val BREAKTHROUGH = "B"
         const val CHARGE = "C"
@@ -101,17 +113,26 @@ class Ability {
         const val GUARD = "G"
         const val LETHAL = "L"
         const val WARD = "W"
+    }
 
-        fun hasGuard(card: Card) : Boolean{
-            return card.abilities.contains(GUARD)
-        }
+
+    fun hasGuard(): Boolean {
+        return abilities.contains(GUARD)
+    }
+
+    fun hasWard(): Boolean {
+        return abilities.contains(WARD)
+    }
+
+    fun hasLethal(): Boolean {
+        return abilities.contains(LETHAL)
     }
 }
 
-class CardType {
+class CardType(var cardType: Int) {
+
     companion object {
         const val CREATURE = 0
-
         const val GREEN_ITEM = 1 // Target : player creature.
         const val RED_ITEM = 2   // Target : opponent creatures.
         const val BLUE_ITEM = 3  // Target : -1 for effect on player or opponent
@@ -125,7 +146,7 @@ fun List<Card>.inHands(): List<Card> {
 }
 
 fun List<Card>.onBoardPlayer(): List<Card> {
-    return this.filter { it.location == Location.PLAYER && !it.hasPlayed }
+    return this.filter { it.location == Location.PLAYER }
 }
 
 fun List<Card>.onBoardOpponent(): List<Card> {
@@ -133,7 +154,7 @@ fun List<Card>.onBoardOpponent(): List<Card> {
 }
 
 fun List<Card>.guards(): List<Card> {
-    return this.filter { Ability.hasGuard(it) }
+    return this.filter { it.abilities.hasGuard() }
 }
 
 // this method needs to be called on the list containing ALL THE CARDS
@@ -148,10 +169,9 @@ fun List<Card>.summonable(remainingMana: Int, summonedCards: Int): List<Card> {
     return this.inHands()
             .filter { it.cost <= remainingMana }
             .filter {
-                it.type == CardType.CREATURE
-                        || it.type == CardType.BLUE_ITEM
-                        || it.type == CardType.GREEN_ITEM && onBoardPlayer.isNotEmpty()
-                        || it.type == CardType.RED_ITEM && onBoardOpponent.isNotEmpty()
+                it.isCreature() || it.isBlueItem()
+                        || it.isGreenItem() && onBoardPlayer.isNotEmpty()
+                        || it.isRedItem() && onBoardOpponent.isNotEmpty()
             }
 }
 
@@ -174,7 +194,7 @@ fun cardToSummon(cards: List<Card>, summonableCards: List<Card>): Card {
 fun targetForGreenItem(cards: List<Card>): Card {
 
     val playerCards = cards.onBoardPlayer();
-    val playerGuard = playerCards.firstOrNull { it.abilities.contains(Ability.GUARD) }
+    val playerGuard = playerCards.firstOrNull { it.abilities.hasGuard() }
     if (playerGuard != null)
         return playerGuard
 
@@ -191,40 +211,34 @@ fun targetForRedItem(cards: List<Card>): Card {
     return cards.onBoardOpponent().first()
 }
 
-fun attackString(cards: List<Card>): String {
+fun attackAction(cards: List<Card>, opponent: Player): Action {
 
 
-    var attackString = ""
-
-    var guards = cards
-            .onBoardOpponent().guards()
-            .sortedWith(compareBy({ -it.defense }, { it.attack }))
+    val actions = Action.emptyInstance()
 
     val attackingCards = cards.onBoardPlayer()
             .filter { it.attack > 0 }
 
-    for (attackingCard in attackingCards) {
+    val actionsToWin = actionsToWin(cards, opponent)
 
-        val attackedCard = cardToAttack(attackingCard, cards)
-        var idToAttack: Int
+    if (!actionsToWin.isPass()) {
+        return actionsToWin
+    } else {
 
-        if (attackedCard != null) {
-            idToAttack = attackedCard.id
+        for (attackingCard in attackingCards) {
 
-            attackingCard.hasPlayed = true
-            attackedCard.defense -= attackingCard.attack
+            val attackedCard = cardToAttack(attackingCard, cards, opponent)
 
-        } else {
-            idToAttack = -1
+            val attackAction = if (attackedCard != null)
+                attackingCard.attack(attackedCard)
+            else
+                attackingCard.attackPlayer(opponent)
+
+            actions += attackAction
+
         }
-        attackString += "ATTACK ${attackingCard.id} $idToAttack ;"
-
     }
-
-    if (attackString == "")
-        return "PASS"
-
-    return attackString
+    return actions
 }
 
 fun attackingGuardId(cards: List<Card>, guard: Card): Int {
@@ -247,7 +261,7 @@ fun attackingGuardId(cards: List<Card>, guard: Card): Int {
 }
 
 
-fun cardToAttack(playerCard: Card, cards: List<Card>): Card? {
+fun cardToAttack(playerCard: Card, cards: List<Card>, opponent: Player): Card? {
     val opponentCards = cards.onBoardOpponent()
     val opponentGuards = cards.onBoardOpponent().guards()
 
@@ -277,6 +291,7 @@ fun cardToAttack(playerCard: Card, cards: List<Card>): Card? {
         return opponentGuards[0]
     }
 
+    // TODO is it more worthy to attack the opponent or an opponent's creature ?
     if (opponentCards.isNotEmpty()) {
         return opponentCards[0]
     }
@@ -284,34 +299,169 @@ fun cardToAttack(playerCard: Card, cards: List<Card>): Card? {
 }
 
 
+fun attackWorthiness(playerCard: Card, opponentCard: Card): Double {
+
+    var worthiness = 0.0
+    //  consider abilities :
+    //   BREAKTHROUGH
+    //   CHARGE
+    //   DRAIN
+    //   GUARD
+    //   LETHAL
+    //   WARD
+
+    var playerHpLoss = opponentCard.attack
+    var opponentHpLoss = playerCard.attack
+
+    val newPlayerHp = playerCard.defense - opponentCard.attack
+    val newOpponentHp = opponentCard.defense - playerCard.attack
+
+    var potentialDmgLost = 0
+    if (newOpponentHp < 0) {
+        potentialDmgLost = Math.abs(newOpponentHp)
+    }
+
+    val playerAlive = newPlayerHp > 0
+    val opponentAlive = newOpponentHp > 0
+
+    if (opponentHpLoss > playerHpLoss) {
+        worthiness += opponentHpLoss - playerHpLoss
+    }
+
+
+
+    worthiness -= potentialDmgLost
+
+    return worthiness
+}
 // attack in priority a card with defense close to the attackingpoints
 // with cards ordered by attack :
 // card.attack >=
 
-fun cardAttackPriority(card: Card): Double {
 
-    val abilities = card.abilities
-    var priority = 0.0
+fun actionsToWin(cards: List<Card>, opponent: Player): Action {
 
-    when {
-        abilities.contains(Ability.GUARD) -> priority += 1
-        abilities.contains(Ability.BREAKTHROUGH) -> priority += 1
-        abilities.contains(Ability.CHARGE) -> priority += 1
+    val winActions = Action.emptyInstance()
+
+    if (cards.onBoardOpponent().guards().isNotEmpty()) {
+        // TODO also check if there are guards, check if guards have wards
+        return Action.emptyInstance()
     }
 
-    priority += (card.attack / card.defense)
+    val playerCards = cards.onBoardPlayer()
+    var totalDmg = playerCards.filter { it.isCreature() }.sumBy { it.attack }
+    totalDmg += playerCards.filter { it.isBlueItem() }.sumBy { -it.defense - it.opponentHpChange }
 
-    return priority
+    if (totalDmg > opponent.hp) {
+        for (card in playerCards) {
+
+            when {
+                card.isCreature() -> winActions += AttackAction(card.id, -1)
+                card.isBlueItem() -> winActions += UseAction(card.id, -1)
+            }
+
+        }
+    }
+    return Action.emptyInstance()
 }
+
 
 fun debugPrint(msg: Any?) {
     System.err.println(msg.toString())
 }
 
-data class Card(val number: Int, val id: Int, val location: Int, val type: Int, val cost: Int, val attack: Int,
-                var defense: Int, val abilities: String, val hpChange: Int, val opponentHpChange: Int,
-                val additionalCardsDraw: Int, var hasPlayed: Boolean = false)
+open class Action protected constructor(private var actionStr: String) {
 
-data class Player(val hp: Int, val mana: Int, val remainingCards: Int, val rune: Int, var remainingMana: Int = mana)
+    private fun intimidate(): String {
+        return ""
+    }
+
+    companion object {
+        fun emptyInstance(): Action {
+            return Action("")
+        }
+    }
+
+    fun isPass(): Boolean {
+        return actionStr == ""
+    }
+
+    override fun toString(): String {
+        if (isPass()) return "PASS"
+        return actionStr + intimidate() + ";"
+    }
+
+    operator fun plusAssign(other: Action) {
+        if (isPass()) {
+            actionStr = other.toString()
+        } else {
+            actionStr += other.toString()
+        }
+    }
+}
+
+class SummonAction(private val playerCardId: Int) : Action("SUMMON $playerCardId") {
+
+    constructor(card: Card) : this(card.id)
+}
+
+class AttackAction(private val id1: Int, private val id2: Int) : Action("ATTACK $id1 $id2") {
+
+    constructor(card1: Card, card2: Card) : this(card1.id, card2.id)
+}
+
+class UseAction(private val id1: Int, private val id2: Int) : Action("USE $id1 $id2") {
+
+    constructor(card1: Card, card2: Card) : this(card1.id, card2.id)
+}
+
+
+data class Card(val number: Int, val id: Int, var location: Int, val type: CardType, val cost: Int, val attack: Int,
+                var defense: Int, val abilities: Abilities, val hpChange: Int, val opponentHpChange: Int,
+                val additionalCardsDraw: Int, var hasPlayed: Boolean = false) {
+
+
+    fun attack(opponentCard: Card): AttackAction {
+        this.location = Location.UNUSABLE
+
+        if (this.abilities.hasLethal()) {
+            opponentCard.defense = 0
+
+        } else if (opponentCard.abilities.hasWard()) {
+            // nothing happens
+        } else {
+            opponentCard.defense -= this.attack
+        }
+
+        return AttackAction(this, opponentCard)
+    }
+
+    fun attackPlayer(opponent: Player): AttackAction {
+        this.location = Location.UNUSABLE
+        opponent.hp -= this.attack
+
+        return AttackAction(this.id, -1)
+    }
+
+
+    fun isCreature(): Boolean {
+        return type.cardType == CardType.CREATURE
+    }
+
+    fun isGreenItem(): Boolean {
+        return type.cardType == CardType.GREEN_ITEM
+    }
+
+    fun isRedItem(): Boolean {
+        return type.cardType == CardType.RED_ITEM
+    }
+
+    fun isBlueItem(): Boolean {
+        return type.cardType == CardType.BLUE_ITEM
+    }
+}
+
+
+data class Player(var hp: Int, val mana: Int, val remainingCards: Int, val rune: Int, var remainingMana: Int = mana)
 
 
