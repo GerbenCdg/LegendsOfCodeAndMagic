@@ -115,6 +115,17 @@ class Abilities(var abilities: String) {
         const val WARD = "W"
     }
 
+    fun hasBreakThrough(): Boolean {
+        return abilities.contains(BREAKTHROUGH)
+    }
+
+    fun hasCharge(): Boolean {
+        return abilities.contains(CHARGE)
+    }
+
+    fun hasDrain(): Boolean {
+        return abilities.contains(DRAIN)
+    }
 
     fun hasGuard(): Boolean {
         return abilities.contains(GUARD)
@@ -213,7 +224,6 @@ fun targetForRedItem(cards: List<Card>): Card {
 
 fun attackAction(cards: List<Card>, opponent: Player): Action {
 
-
     val actions = Action.emptyInstance()
 
     val attackingCards = cards.onBoardPlayer()
@@ -235,7 +245,6 @@ fun attackAction(cards: List<Card>, opponent: Player): Action {
                 attackingCard.attackPlayer(opponent)
 
             actions += attackAction
-
         }
     }
     return actions
@@ -264,6 +273,7 @@ fun attackingGuardId(cards: List<Card>, guard: Card): Int {
 fun cardToAttack(playerCard: Card, cards: List<Card>, opponent: Player): Card? {
     val opponentCards = cards.onBoardOpponent()
     val opponentGuards = cards.onBoardOpponent().guards()
+            .sortedBy { -attackWorthiness(opponentCards, playerCard, it) }
 
     // attack order :
     // - cards with high attack and low defense
@@ -292,14 +302,21 @@ fun cardToAttack(playerCard: Card, cards: List<Card>, opponent: Player): Card? {
     }
 
     // TODO is it more worthy to attack the opponent or an opponent's creature ?
+
     if (opponentCards.isNotEmpty()) {
-        return opponentCards[0]
+        if (playerCard.abilities.hasLethal()) {
+            return opponentCards.filter { !it.abilities.hasWard() }
+                    .sortedBy { -it.defense }
+                    .first()
+        }
+        return opponentCards.sortedBy { -attackWorthiness(opponentCards, playerCard, it) }
+                .first()
     }
     return null // attack the player
 }
 
 
-fun attackWorthiness(playerCard: Card, opponentCard: Card): Double {
+fun attackWorthiness(opponentCards: List<Card>, playerCard: Card, opponentCard: Card): Double {
 
     var worthiness = 0.0
     //  consider abilities :
@@ -310,27 +327,20 @@ fun attackWorthiness(playerCard: Card, opponentCard: Card): Double {
     //   LETHAL
     //   WARD
 
-    var playerHpLoss = opponentCard.attack
-    var opponentHpLoss = playerCard.attack
+    val combatResults = simulateAttack(playerCard, opponentCard)
+    val playerResult = combatResults.first
+    val opponentResult = combatResults.second
 
-    val newPlayerHp = playerCard.defense - opponentCard.attack
-    val newOpponentHp = opponentCard.defense - playerCard.attack
+    val playerAlive = playerResult.newDefense > 0
+    val opponentAlive = opponentResult.newDefense > 0
 
-    var potentialDmgLost = 0
-    if (newOpponentHp < 0) {
-        potentialDmgLost = Math.abs(newOpponentHp)
+    val potentialDmgLost = playerResult.potentialDmg - playerResult.dmgDone
+
+    if (!playerCard.abilities.hasBreakThrough()) {
+        worthiness -= potentialDmgLost
+        debugPrint("(${playerCard.id}) worthiness for ${opponentCard.id}: $worthiness")
     }
-
-    val playerAlive = newPlayerHp > 0
-    val opponentAlive = newOpponentHp > 0
-
-    if (opponentHpLoss > playerHpLoss) {
-        worthiness += opponentHpLoss - playerHpLoss
-    }
-
-
-
-    worthiness -= potentialDmgLost
+    // todo worthiness increases if drain and card.dmg > opponentcard.dmg
 
     return worthiness
 }
@@ -338,6 +348,52 @@ fun attackWorthiness(playerCard: Card, opponentCard: Card): Double {
 // with cards ordered by attack :
 // card.attack >=
 
+fun simulateAttack(playerCard: Card, opponentCard: Card): Pair<CombatResultPlayer, CombatResultOpponent> {
+
+    var newPlayerHp = playerCard.defense
+    var newOpponentHp = opponentCard.defense
+
+    if (playerCard.abilities.hasLethal()) {
+        newOpponentHp = 0
+    } else {
+        newOpponentHp -= playerCard.attack
+    }
+
+    if (opponentCard.abilities.hasWard()) {
+        newOpponentHp = opponentCard.defense
+    }
+
+    if (opponentCard.abilities.hasLethal()) {
+        newPlayerHp = 0
+    } else {
+        newPlayerHp -= opponentCard.attack
+    }
+
+    if (playerCard.abilities.hasWard()) {
+        newPlayerHp = playerCard.defense
+    }
+
+    val dmgDoneByPlayer = opponentCard.defense - newOpponentHp.coerceAtLeast(0)
+    val totalDmgDoneByPlayer: Int
+
+    val dmgDoneByOpponent = playerCard.defense - newPlayerHp.coerceAtLeast(0)
+
+    // TODO check special case where card has both Breakthrough and Lethal
+    if (!playerCard.abilities.hasBreakThrough()) {
+        totalDmgDoneByPlayer = dmgDoneByPlayer
+    } else {
+        totalDmgDoneByPlayer = opponentCard.defense - newOpponentHp
+    }
+
+    val potentialDmg = if (opponentCard.abilities.hasWard()) 0 else playerCard.attack
+
+    val playerResult = CombatResultPlayer(newPlayerHp, potentialDmg, dmgDoneByPlayer, totalDmgDoneByPlayer)
+    val opponentResult = CombatResultOpponent(newOpponentHp, dmgDoneByOpponent)
+
+    return Pair(playerResult, opponentResult)
+}
+
+// target of items depending on abilities given
 
 fun actionsToWin(cards: List<Card>, opponent: Player): Action {
 
@@ -354,15 +410,13 @@ fun actionsToWin(cards: List<Card>, opponent: Player): Action {
 
     if (totalDmg > opponent.hp) {
         for (card in playerCards) {
-
             when {
                 card.isCreature() -> winActions += AttackAction(card.id, -1)
                 card.isBlueItem() -> winActions += UseAction(card.id, -1)
             }
-
         }
     }
-    return Action.emptyInstance()
+    return winActions
 }
 
 
@@ -414,6 +468,21 @@ class UseAction(private val id1: Int, private val id2: Int) : Action("USE $id1 $
 
     constructor(card1: Card, card2: Card) : this(card1.id, card2.id)
 }
+
+
+/**
+ * @param newDefense defense after the attack
+ * @param potentialDmg the potential damage : 0 if the opponentCard has ward, else playerCard.attack
+ * @param dmgDone real damage inflicted to opponentCard
+ * @param totalDmgDone sum of damage to opponentCard + damage to the opponent if the card has breakthrough
+ */
+data class CombatResultPlayer(val newDefense: Int, val potentialDmg: Int, val dmgDone: Int, val totalDmgDone: Int)
+
+/**
+ * @param newDefense defense after the attack
+ * @param dmgDone real damage inflicted to playerCard
+ */
+data class CombatResultOpponent(val newDefense: Int, val dmgDone: Int)
 
 
 data class Card(val number: Int, val id: Int, var location: Int, val type: CardType, val cost: Int, val attack: Int,
